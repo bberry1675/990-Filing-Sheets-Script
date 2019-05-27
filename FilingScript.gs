@@ -70,30 +70,6 @@ function getParsingDocuments(){
   return parseSheets;
 }
 
-
-function testParseXML(){
-  var url = 'https://s3.amazonaws.com/irs-form-990/201100459349301165_public.xml';
-  var xml = UrlFetchApp.fetch(url).getContentText();
-  var document = XmlService.parse(xml);
-  var root = document.getRootElement();
-  var descptionList = [];
-  var valueList = [];
-  var runner = function(element){
-    if(element.getChildren().length == 0){
-      descptionList.push(testheir(element));
-      valueList.push(element.getText());
-      Logger.log(testheir(element) + ' - ' + element.getText());
-    }
-    else{
-      element.getChildren().forEach(runner);
-    }
-  };
-  root.getChildren().forEach(runner);
-  return [descptionList,valueList];
-}
-
-
-
 function testheir(element){
   if(element == null){
     return '';
@@ -120,39 +96,6 @@ function parseXML(url){
   };
   root.getChildren().forEach(runner);
   return [descptionList,valueList];
-}
-
-function exportFilingsToParseDocuments(){
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var toExportSheet = ss.getSheetByName('Unique Id to URL');
-  if(toExportSheet != null){
-    var years = getIndexYears();
-    var dataRange = toExportSheet.getRange(2, 1, toExportSheet.getLastRow() - 1, toExportSheet.getLastColumn()).getValues();
-    var parsingDocs = getParsingDocuments();
-    years.forEach(function(element){
-      var parseSS = SpreadsheetApp.openById(parsingDocs[element]);
-      var parseKeySheet = parseSS.getSheetByName('RawKeys');
-      var parseValueSheet = parseSS.getSheetByName('RawValues');
-      var parsedIDs = parseKeySheet.getRange(1,1,(parseKeySheet.getLastRow() > 0 ? parseKeySheet.getLastRow(): 1),1).getValues().map(function(row){return row[0];});
-      
-      dataRange.forEach(function(row){
-        if(row[2] == element && parsedIDs.indexOf(row[0]) == -1){
-          var parsedInfo = parseXML(row[3]);
-          parsedInfo[0].unshift(row[0]);
-          parsedInfo[1].unshift(row[0]);
-          parseKeySheet.appendRow(parsedInfo[0]);
-          parseValueSheet.appendRow(parsedInfo[1]);
-        }
-      });
-      
-      
-      
-      
-    });
-  }
-  else{
-    ss.toast('Cannot find "Unique Id to URL" Sheet');
-  }
 }
 
 function makeParseSSObject(years, documentIDs){
@@ -184,7 +127,7 @@ function extendedExportFilingsToParseDocuments() {
             var parseCounter = 0;
 
             //2d array for the rows in export sheet
-            var filingsToParse = toExportSheet.getRange(startRow + 1, 1, toExportSheet.getLastRow(), toExportSheet.getLastColumn()).getValues();
+            var filingsToParse = toExportSheet.getRange(startRow + 1, 1, toExportSheet.getLastRow(), toExportSheet.getLastColumn()).getValues().filter(function(row){return row[0] != '';});
 
             //list of years for filings
             var years = getIndexYears();
