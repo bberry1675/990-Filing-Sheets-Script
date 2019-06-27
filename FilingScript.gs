@@ -1,4 +1,278 @@
 
+function rangeAggregateXmlFiles(){
+  var range = SpreadsheetApp.getActiveRange();
+  var sheet = range.getSheet();
+  if(sheet.getName() == 'Unique Id to URL'){
+    var time = (new Date()).toLocaleString();
+    var values = sheet.getRange(range.getRow(),1,range.getHeight(),4).getValues();
+    var aggregate = XmlService.createDocument(XmlService.createElement('Return'));
+    var attachs = {}
+    var compressed;
+    var lastEIN = parseInt(values[0][1],10);
+    values.forEach(function(row){
+      if(parseInt(row[1],10) != lastEIN){
+        attachs[lastEIN] = aggregate;
+        aggregate = XmlService.createDocument(XmlService.createElement('Return'));
+        lastEIN = parseInt(row[1],10);
+      }
+      compressed = compressXMLDocument( getFilingXML(row[3]) );
+      aggregate = aggregateDocument(aggregate, compressed, row[0]);
+    });
+    attachs[lastEIN] = aggregate;
+    var savedFileNames = [];
+    Object.keys(attachs).forEach(function(ein){
+      savedFileNames.push(ein+'_'+time+'.xml');
+      DriveApp.addFile(DriveApp.createFile(ein+'_'+time+'.xml', XmlService.getPrettyFormat().format(attachs[ein]), 'text/xml'))
+    });
+    
+    SpreadsheetApp.getActiveSpreadsheet().toast(savedFileNames.join('\n'), 'Saved Files to Drive');
+  }
+  else{
+    SpreadsheetApp.getActiveSpreadsheet().toast("Must be on 'Unique Id to URL'");
+  }
+  
+}
+
+function aggregateXmlFiles(){
+  var startTime = (new Date()).getTime();
+  var ss = SpreadsheetApp.getActive();
+  var sheet = ss.getSheetByName("Unique Id to URL");
+
+  var currentTime = startTime;
+  var aggregateDoc;
+  var lastEIN;
+  var currentRow;
+  var currentLineNumber;
+  var currentFiling;
+  var endLine;
+  var props = PropertiesService.getScriptProperties();
+  currentLineNumber = props.getProperty('aggregate_curr_row');
+  try{
+  //if there was no current row then set the current row to 1 which is the recond row in the spreadsheet
+  currentLineNumber = (currentLineNumber == null) ? 0 : currentLineNumber;
+  currentLineNumber = parseInt(currentLineNumber,10);
+
+  console.log("starting at line: " + currentLineNumber);
+  
+  lastEIN = -1;
+  
+  while((currentTime - startTime < 300000) && currentLineNumber < sheet.getLastRow() ){
+    
+    currentRow = sheet.getRange(currentLineNumber + 2, 1, 1, 4).getValues()[0];
+    
+    if(currentRow[1] != lastEIN){
+      //save the aggregate doc
+      if(aggregateDoc != undefined){
+        //Logger.log('finishing: ' + currentRow[1].toString());
+        saveXmlObject(aggregateDoc,currentRow[1].toString());
+      }
+      
+      //set aggregate doc to new one
+      aggregateDoc = getExisitingAggregateDocument(currentRow[1].toString());
+      //Logger.log('got to after getting existing aggregate document');
+      
+    }
+    
+    currentFiling = getFilingXML(currentRow[3]);
+    aggregateDoc = aggregateDocument(aggregateDoc, compressXMLDocument(currentFiling) , currentRow[0].toString() );
+    
+    
+    
+    lastEIN = currentRow[1];
+    currentLineNumber = currentLineNumber + 1;
+    //get the time again
+    currentTime = (new Date()).getTime();
+  }
+  
+  var triggers = ScriptApp.getProjectTriggers();
+  triggers.forEach(function(trigger){
+    if(trigger.getHandlerFunction()	== 'aggregateXmlFiles'){
+      ScriptApp.deleteTrigger(trigger);
+    }
+  });
+      
+  
+  //save the current document being aggregated
+  if(currentLineNumber >= sheet.getLastRow()){
+      props.deleteProperty('aggregate_curr_row');
+      MailApp.sendEmail(Session.getEffectiveUser().getEmail(), 'Aggregate Xml Filings', "Script has finished aggregating all xml filings in " + ss.getName() + " into 'Aggregate Filings' drive folder.");
+  }
+  else{
+      props.setProperty('aggregate_curr_row', currentLineNumber);
+      console.log('Finishing at line: ' + currentLineNumber);
+      
+
+      ScriptApp.newTrigger('aggregateXmlFiles').timeBased().after(90000).create();
+  }
+  
+  saveXmlObject(aggregateDoc,lastEIN);
+  
+  }catch(err){
+    MailApp.sendEmail(Session.getEffectiveUser().getEmail(),'Failure to Aggregate Xml Filings', err.message);
+  }
+
+
+}
+
+
+
+//takes document object of xml and saves it
+function saveXmlObject(document,fileName){
+  var oldFileID = getExistingAggregateDocumentID(fileName);
+  var driveFile;
+  var folderIter = DriveApp.getFoldersByName("Aggregate Filings");
+  var aggregateFolder = folderIter.next();
+  var file = DriveApp.createFile(fileName + '.xml', XmlService.getPrettyFormat().format(document), 'text/xml');
+
+  if(oldFileID != null){
+    DriveApp.getFileById(oldFileID).setTrashed(true);
+  }
+
+  aggregateFolder.addFile(file);
+}
+
+function aggregateDocument(aggregate, compressedDoc, compressedDocQuantifier){
+  Object.keys(compressedDoc).reverse().forEach(function(header){
+    //get ride of the beginning / and split the string into the node names
+    var path = header.slice(1).split('/');
+    //assuming the root element will always be Return
+    path.shift();
+    //Logger.log('Travelling path: ' + path);
+    var currentNode = aggregate.getRootElement();
+    var namespace = currentNode.getNamespace();
+    //Logger.log(typeof compressedDocQuantifier);
+    //Logger.log('<' + compressedDocQuantifier + '></'+compressedDocQuantifier+'>');
+    //var elementToAdd = XmlService.parse('<' + compressedDocQuantifier + '></'+compressedDocQuantifier+'>').detachRootElement();
+    var elementToAdd = XmlService.createElement('UNIQUE' + compressedDocQuantifier.trim());
+    
+    //Logger.log('after element to add');
+    elementToAdd.setNamespace(namespace);
+    elementToAdd.setText(compressedDoc[header]);
+    
+    path.forEach(function(currentPath){
+      var children = currentNode.getChildren(currentPath,namespace);
+      //if there is a child node with the name of the current header
+      if(children.length > 0){
+        //Logger.log('Found Child For: ' + currentPath);
+        currentNode = children[0];
+        //Logger.log(currentNode);
+      }
+      //if there isn't a child node with the same name means we have to create it
+      else{
+        //Logger.log('Making a new node for: ' + currentPath);
+        currentNode.addContent(XmlService.createElement(currentPath, namespace));
+        currentNode = currentNode.getChildren(currentPath,namespace)[0];
+        //Logger.log(currentNode);
+      }
+    });
+
+    currentNode.addContent(elementToAdd);    
+  });
+  
+  return aggregate;
+}
+
+function getExisitingAggregateDocument(EIN){
+  var id = getExistingAggregateDocumentID(EIN);
+  if(id == null){
+    return XmlService.createDocument(XmlService.createElement('Return'));;
+  }
+  else{
+  
+    return XmlService.parse(DriveApp.getFileById(id).getBlob().getDataAsString());
+  }
+}
+
+//returns the ID of the document or null if it doesn't exist
+function getExistingAggregateDocumentID(EIN){
+  var folderIter =  DriveApp.getFoldersByName("Aggregate Filings");
+  var folder;
+  if(folderIter.hasNext() == false){
+    folder = DriveApp.createFolder("Aggregate Filings");
+  }
+  else{
+    folder = folderIter.next();
+  }
+  
+  var fileIter = folder.getFiles();
+  var file;
+  var curr;
+  while(file === undefined){
+    if(fileIter.hasNext()){
+      curr = fileIter.next();
+      if(curr.getName().indexOf(EIN) != -1){
+        file = curr;
+      }
+    }
+    else{
+      file = null;
+    }
+  }
+  
+  return (file == null) ? null : file.getId();
+}
+
+//takes a Document class from XmlService.parse
+//returns an object with the headers being the keys and the values being values
+function compressXMLDocument(xmlDoc){
+  var root = xmlDoc.getRootElement();
+  var retObj = {};
+  var elementsToVisit = [];
+  elementsToVisit.push(root);
+  while(elementsToVisit.length > 0){
+    var current = elementsToVisit.pop();
+    if(current.getChildren().length == 0){
+      var name = getElementPath(current);
+      //Logger.log(name);
+      var value = current.getText();
+      retObj[name] = value;
+    }
+    else{
+      current.getChildren().forEach(function(child){elementsToVisit.push(child);});
+    }
+  }
+  return retObj;
+}
+
+//gets the Document object for an XML page at URL
+function getFilingXML(url){
+  //Logger.log(url);
+  var response = UrlFetchApp.fetch(encodeURI(url).replace('%0D','')).getContentText();
+  return XmlService.parse(response);
+}
+
+function getElementPath(element){
+  if(element == null){
+    return '';
+  }
+  else{
+    return getElementPath(element.getParentElement()) + '/' + element.getName();
+  }
+}
+
+
+function placeHeaders(ss){
+  if(ss != null){
+    var rawKeys = ss.getSheetByName('RawKeys');
+    if(rawKeys != null){
+      var headers = {};
+      var keyMatrix = rawKeys.getRange(1,2,rawKeys.getLastRow(), rawKeys.getLastColumn() - 1).getValues();
+      for(var i = 0 ; i < keyMatrix.length; i++){
+        for(var j = 0; j < keyMatrix[i].length; j++){
+          if(headers[keyMatrix[i][j]] === undefined){
+            headers[keyMatrix[i][j]] = 1;
+          }
+          else{
+            headers[keyMatrix[i][j]] = headers[keyMatrix[i][j]] + 1;
+          }
+        }
+      }
+
+      
+    }
+  }
+}
+
 function makeSSInFolder(folder, name){
   var newSS = SpreadsheetApp.create(name);
   newSS.insertSheet("RawKeys");
@@ -290,7 +564,7 @@ function addFullCustomMenu(){
   var ExportSubMenu = ui.createMenu('Export Menu');
   //if Unique to ID sheet exists then give options to remake the sheet, full export, regular export
   if(SpreadsheetApp.getActiveSpreadsheet().getSheetByName(getStaticVariables().exportSheet)){
-    ExportSubMenu.addItem('Make ID to URL Sheet','insertUniqueToId').addItem('Hard Parse all URLs', 'cleanParsingThenParse').addItem('Soft Parse URLs ', 'extendedExportFilingsToParseDocuments');
+    ExportSubMenu.addItem('Make ID to URL Sheet','insertUniqueToId').addItem('Hard Parse all URLs', 'cleanParsingThenParse').addItem('Soft Parse URLs ', 'extendedExportFilingsToParseDocuments').addItem('Aggregate Xml Files', 'aggregateXmlFiles').addItem('Aggregate Range','rangeAggregateXmlFiles');
   }
   //if not then only give option to create the sheet
   else{
